@@ -292,7 +292,9 @@ elif page == "AI Planner":
             use_container_width=True
         )
 
-    # Generate Schedule
+    # --------------------------------
+    # GENERATE SCHEDULE
+    # --------------------------------
 
     if generate:
 
@@ -331,7 +333,7 @@ elif page == "AI Planner":
                     "🤖 AI Agent is analyzing and preparing your schedule..."
                 ):
 
-                    schedule = create_daily_schedule(
+                    schedule_result = create_daily_schedule(
                         tasks=combined_tasks,
                         available_hours=available_hours,
                         start_time=start_time.strftime("%I:%M %p"),
@@ -339,25 +341,52 @@ elif page == "AI Planner":
                         date=get_current_date()
                     )
 
-                    # Check JSON format
-                    schedule_data = json.loads(schedule)
+                    # Handle dictionary or JSON string
+
+                    if isinstance(schedule_result, dict):
+
+                        schedule_data = schedule_result
+
+                    elif isinstance(schedule_result, str):
+
+                        schedule_data = json.loads(schedule_result)
+
+                    else:
+
+                        raise ValueError(
+                            "Invalid schedule response."
+                        )
+
+                    # Validate schedule format
 
                     if not isinstance(
                         schedule_data.get("schedule"),
                         list
                     ):
+
                         raise ValueError(
                             "Invalid schedule format."
                         )
 
+                    # Store schedule as JSON string
+
+                    schedule = json.dumps(
+                        schedule_data,
+                        ensure_ascii=False,
+                        indent=4
+                    )
+
                     st.session_state["generated_schedule"] = schedule
+
                     st.session_state["schedule_date"] = get_current_date()
 
                 st.success(
                     "Your AI schedule has been generated successfully!"
                 )
-                st.success("Python Schedule Validation: PASSED")
-                
+
+                st.success(
+                    "Python Schedule Validation: PASSED"
+                )
 
             except Exception as e:
 
@@ -365,7 +394,9 @@ elif page == "AI Planner":
                     f"Agent Error: {str(e)}"
                 )
 
-    # Display Generated Schedule
+    # --------------------------------
+    # DISPLAY GENERATED SCHEDULE
+    # --------------------------------
 
     if "generated_schedule" in st.session_state:
 
@@ -398,9 +429,7 @@ elif page == "AI Planner":
                     for item in schedule_items
                 )
 
-                total_activities = len(
-                    schedule_items
-                )
+                total_activities = len(schedule_items)
 
                 task_count = sum(
                     1 for item in schedule_items
@@ -440,6 +469,8 @@ elif page == "AI Planner":
                     "### 🗓️ Daily Timetable"
                 )
 
+                # Prepare timetable rows
+
                 table_data = []
 
                 for index, item in enumerate(
@@ -457,11 +488,26 @@ elif page == "AI Planner":
                         "Type": item["type"].title()
                     })
 
-                st.dataframe(
-                    table_data,
-                    use_container_width=True,
-                    hide_index=True
-                )
+                # Display timetable without pandas / pyarrow
+
+                table_markdown = """
+| No. | Activity | Start Time | End Time | Duration | Goal | Type |
+|---|---|---|---|---|---|---|
+"""
+
+                for item in table_data:
+
+                    table_markdown += (
+                        f"| {item['No.']} "
+                        f"| {item['Activity']} "
+                        f"| {item['Start Time']} "
+                        f"| {item['End Time']} "
+                        f"| {item['Duration']} "
+                        f"| {item['Goal']} "
+                        f"| {item['Type']} |\n"
+                    )
+
+                st.markdown(table_markdown)
 
                 # Download JSON
 
