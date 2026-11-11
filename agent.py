@@ -45,16 +45,29 @@ class PlannerState(TypedDict, total=False):
 
 
 # ==========================================
-# 4. HELPER FUNCTION: TIME CONVERSION
+# 4. TIME HELPER FUNCTIONS
 # ==========================================
 
 def time_to_minutes(time_text):
-    parsed = datetime.strptime(time_text.strip(), "%I:%M %p")
-    return parsed.hour * 60 + parsed.minute
+
+    time_text = time_text.strip()
+
+    for time_format in ("%I:%M %p", "%H:%M"):
+
+        try:
+            parsed = datetime.strptime(time_text, time_format)
+            return parsed.hour * 60 + parsed.minute
+
+        except ValueError:
+            continue
+
+    raise ValueError(f"Invalid time format: {time_text}")
 
 
 def minutes_to_time(minutes):
+
     minutes = minutes % (24 * 60)
+
     return datetime.strptime(
         f"{minutes // 60:02d}:{minutes % 60:02d}",
         "%H:%M"
@@ -79,14 +92,14 @@ def analyze_tasks(state: PlannerState):
     {state['available_hours']}
 
     Additional Instructions:
-    {state['instructions']}
+    {state.get('instructions', '')}
 
     Identify:
     1. Every task and its priority.
     2. Important and urgent tasks.
     3. Estimated time for each task.
     4. User preferences.
-    5. A reasonable time allocation.
+    5. Reasonable time allocation.
 
     Do not invent additional user tasks.
     Return a clear task analysis.
@@ -108,7 +121,7 @@ def generate_schedule(state: PlannerState):
     prompt = f"""
     You are a professional AI daily planner.
 
-    Date: {state['date']}
+    Date: {state.get('date', '')}
     Starting Time: {state['start_time']}
     Available Hours: {state['available_hours']}
 
@@ -116,7 +129,7 @@ def generate_schedule(state: PlannerState):
     {state['task_analysis']}
 
     User Instructions:
-    {state['instructions']}
+    {state.get('instructions', '')}
 
     Generate a realistic daily timetable.
 
@@ -126,12 +139,12 @@ def generate_schedule(state: PlannerState):
     - Do not exceed the available time.
     - Do not leave gaps between activities.
     - Do not create overlapping activities.
-    - Give more time to high-priority tasks.
+    - Give more time to important tasks.
     - Include short breaks.
-    - Use 12-hour time format.
+    - Use 12-hour time format with AM/PM.
     - Activities must be in chronological order.
-    - Every activity must have a start and end time.
-    - Duration must match the start and end times.
+    - Every activity must have start and end times.
+    - Duration must match start and end times.
     - Use only task or break as activity type.
     - Include a clear goal for every activity.
 
@@ -171,7 +184,26 @@ def generate_schedule(state: PlannerState):
 
 
 # ==========================================
-# 7. PYTHON SCHEDULE VALIDATOR
+# 7. CLEAN JSON RESPONSE
+# ==========================================
+
+def clean_json_response(schedule_text):
+
+    if not isinstance(schedule_text, str):
+        raise TypeError("AI schedule response must be a string.")
+
+    cleaned_text = schedule_text.strip()
+
+    if cleaned_text.startswith("```"):
+
+        cleaned_text = cleaned_text.replace("```json", "")
+        cleaned_text = cleaned_text.replace("```", "").strip()
+
+    return cleaned_text
+
+
+# ==========================================
+# 8. PYTHON SCHEDULE VALIDATOR
 # ==========================================
 
 def validate_schedule_data(
@@ -182,37 +214,47 @@ def validate_schedule_data(
 
     try:
 
-        cleaned_text = schedule_text.strip()
-
-        # Remove Markdown code fences if present
-        if cleaned_text.startswith("```"):
-            cleaned_text = cleaned_text.replace("```json", "")
-            cleaned_text = cleaned_text.replace("```", "").strip()
+        cleaned_text = clean_json_response(schedule_text)
 
         data = json.loads(cleaned_text)
+
         activities = data["schedule"]
 
         if not isinstance(activities, list) or not activities:
             return False, "Schedule is empty or invalid."
 
         requested_start = time_to_minutes(start_time)
+
         available_minutes = int(round(available_hours * 60))
 
         if available_minutes <= 0:
             return False, "Available hours must be greater than zero."
 
-        expected_end = (requested_start + available_minutes) % (24 * 60)
+        if available_minutes > 24 * 60:
+            return False, "Available hours cannot exceed 24 hours."
+
+        expected_end = (
+            requested_start + available_minutes
+        ) % (24 * 60)
 
         previous_end = None
         total_minutes = 0
         has_break = False
 
-        for index, item in enumerate(activities, start=1):
+        for item in activities:
 
             activity_name = item["activity"]
-            activity_start = time_to_minutes(item["start_time"])
-            activity_end = time_to_minutes(item["end_time"])
+
+            activity_start = time_to_minutes(
+                item["start_time"]
+            )
+
+            activity_end = time_to_minutes(
+                item["end_time"]
+            )
+
             duration = int(item["duration_minutes"])
+
             activity_type = item.get("type", "").lower()
 
             if duration <= 0:
@@ -221,7 +263,6 @@ def validate_schedule_data(
             if activity_type not in ["task", "break"]:
                 return False, f"Invalid activity type in {activity_name}."
 
-            # Calculate actual duration, including midnight crossing
             actual_duration = (
                 activity_end - activity_start
             ) % (24 * 60)
@@ -232,7 +273,6 @@ def validate_schedule_data(
             if actual_duration != duration:
                 return False, f"Duration mismatch in {activity_name}."
 
-            # First activity must start at requested time
             if previous_end is None:
 
                 if activity_start != requested_start:
@@ -240,42 +280,42 @@ def validate_schedule_data(
 
             else:
 
-                if activity_start < previous_end:
-                    return False, "Overlapping activities detected."
-
-                if activity_start > previous_end:
-                    return False, "Unscheduled time gap detected."
+                if activity_start != previous_end:
+                    return False, "Overlapping activities or time gaps detected."
 
             if activity_type == "break":
                 has_break = True
 
             total_minutes += duration
+
             previous_end = activity_end
 
-        # Check total available duration
         if total_minutes > available_minutes:
             return False, "Schedule exceeds available hours."
 
         if total_minutes != available_minutes:
-            return False, "Schedule does not use the available time fully."
+            return False, "Schedule does not use available time fully."
 
-        # Check exact ending time
         if previous_end != expected_end:
             return False, "Schedule does not end at the expected time."
 
-        # Require at least one break
         if not has_break:
             return False, "At least one break is required."
 
         return True, "All schedule checks passed."
 
-    except (ValueError, KeyError, TypeError, json.JSONDecodeError) as error:
+    except (
+        ValueError,
+        KeyError,
+        TypeError,
+        json.JSONDecodeError
+    ) as error:
 
         return False, f"Schedule validation error: {error}"
 
 
 # ==========================================
-# 8. NODE 3: VALIDATE AND CORRECT SCHEDULE
+# 9. NODE 3: VALIDATE AND CORRECT SCHEDULE
 # ==========================================
 
 def validate_schedule(state: PlannerState):
@@ -288,7 +328,6 @@ def validate_schedule(state: PlannerState):
         state["available_hours"]
     )
 
-    # Ask AI to correct the schedule if validation fails
     if not is_valid:
 
         correction_prompt = f"""
@@ -307,7 +346,6 @@ def validate_schedule(state: PlannerState):
         {state['available_hours']}
 
         Return ONLY valid JSON.
-        Do not use Markdown code blocks.
 
         Required structure:
 
@@ -320,6 +358,14 @@ def validate_schedule(state: PlannerState):
                     "duration_minutes": 60,
                     "goal": "Complete Python practice",
                     "type": "task"
+                }},
+                {{
+                    "activity": "Break",
+                    "start_time": "05:00 PM",
+                    "end_time": "05:05 PM",
+                    "duration_minutes": 5,
+                    "goal": "Rest and stretch",
+                    "type": "break"
                 }}
             ]
         }}
@@ -333,20 +379,18 @@ def validate_schedule(state: PlannerState):
         - Include at least one break.
         - Duration must match start and end times.
         - Use task or break as the type.
-        - Use 12-hour time format.
+        - Use 12-hour time format with AM/PM.
         """
 
         response = llm.invoke(correction_prompt)
 
-        corrected_schedule = response.content
+        schedule_text = response.content
 
         is_valid, message = validate_schedule_data(
-            corrected_schedule,
+            schedule_text,
             state["start_time"],
             state["available_hours"]
         )
-
-        schedule_text = corrected_schedule
 
     if not is_valid:
 
@@ -361,25 +405,30 @@ def validate_schedule(state: PlannerState):
 
 
 # ==========================================
-# 9. BUILD LANGGRAPH WORKFLOW
+# 10. BUILD LANGGRAPH WORKFLOW
 # ==========================================
 
 workflow = StateGraph(PlannerState)
 
 workflow.add_node("analyze_tasks", analyze_tasks)
+
 workflow.add_node("generate_schedule", generate_schedule)
+
 workflow.add_node("validate_schedule", validate_schedule)
 
 workflow.add_edge(START, "analyze_tasks")
+
 workflow.add_edge("analyze_tasks", "generate_schedule")
+
 workflow.add_edge("generate_schedule", "validate_schedule")
+
 workflow.add_edge("validate_schedule", END)
 
 planner_agent = workflow.compile()
 
 
 # ==========================================
-# 10. MAIN FUNCTION
+# 11. MAIN FUNCTION
 # ==========================================
 
 def create_daily_schedule(
@@ -400,15 +449,23 @@ def create_daily_schedule(
 
     })
 
-    # Return both schedule and validation result
+    # Convert JSON string into Python dictionary
+
+    schedule_data = json.loads(
+        clean_json_response(result["schedule"])
+    )
+
+    if not isinstance(schedule_data.get("schedule"), list):
+        raise ValueError("Invalid schedule format.")
+
     return {
-        "schedule": result["schedule"],
+        "schedule": schedule_data["schedule"],
         "validation": result["validation"]
     }
 
 
 # ==========================================
-# 11. TEST THE AGENT
+# 12. TEST THE AGENT
 # ==========================================
 
 if __name__ == "__main__":
@@ -423,22 +480,29 @@ if __name__ == "__main__":
 
         available_hours=4,
 
-        start_time="04:00 PM",
+        start_time="16:00",
 
         instructions="Give more time to Python Study.",
 
-        date="07 November 2026"
+        date="11 November 2026"
     )
 
     print("\nGENERATED DAILY SCHEDULE")
 
-    print(test_result["schedule"])
+    print(
+        json.dumps(
+            test_result["schedule"],
+            indent=4,
+            ensure_ascii=False
+        )
+    )
 
     print("\nPYTHON VALIDATION RESULT")
 
     print(test_result["validation"])
 
+    print("\nLangGraph Daily Planner Agent Created Successfully!")
 
-print("\nLangGraph Daily Planner Agent Created Successfully!")
-print("Workflow: Analyze -> Generate -> Validate")
-print("Python Schedule Validation: Enabled")
+    print("Workflow: Analyze -> Generate -> Validate")
+
+    print("Python Schedule Validation: Enabled")
